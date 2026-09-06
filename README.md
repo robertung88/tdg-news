@@ -65,13 +65,37 @@ Each item includes `title`, `url`, `lead` (the article's lead/description text),
 
 ## Integration
 
-The Hearth profile's **Geneva morning brief (tdg.ch)** cron job runs this script and asks the agent to compile the 6–8 most notable stories into a short Telegram brief:
+This script exists to power the **Hearth** profile's cron job **"Geneva morning brief (tdg.ch)"** (`job id d33a2cfd15f7`), which builds the daily Geneva news brief delivered to the "House of Ung" Telegram chat.
 
-```bash
-python3 /home/roblinux/tdg-news/tdg.py top 15 --json
-```
+The job is an LLM-driven agent task — it does not call the script directly. Instead, its prompt instructs the agent to run the script in the terminal and curate the result:
 
-The path is host-specific; point the path at wherever you clone this repo.
+> Build a concise Geneva-morning news brief from the Tribune de Genève. Run in the terminal: `python3 /home/roblinux/tdg-news/tdg.py top 15 --json`. Pick the 6–8 most notable Geneva stories. Present EVERY headline as a CLICKABLE link in Telegram markdown — [Titre](url) — each followed by a 1–2 sentence English summary from that item's lead text. Start with a one-line 'À la une' opener. Group by theme (politique, faits divers, grand Genève, société...) if it reads cleanly. Keep the whole thing under ~250 words. Every headline MUST be a clickable link to its article. If the feed fetch fails or returns nothing, say so plainly and do NOT invent stories.
+
+Job summary:
+
+| Field | Value |
+|-------|-------|
+| Profile | `hearth` |
+| Job ID | `d33a2cfd15f7` |
+| Schedule | `30 7 * * *` (07:30 CET, daily) |
+| Deliver | `origin` → Telegram "House of Ung" (`-1003950035504`) |
+| Model | `deepseek-v4-flash-vision-exp` (served from sparky) |
+
+### Re-homing on a fresh host
+
+The script path is **host-specific**. On the Omarchy host it lives at `/home/roblinux/tdg-news/tdg.py`; on the old Mac Mini Docker setup it was `/root/tdg-news/tdg.py`. When cloning to a new host:
+
+1. Clone this repo into a stable location (e.g. `~/tdg-news`).
+2. Update the cron job prompt to point at the local path:
+   ```bash
+   hermes -p hearth cron edit d33a2cfd15f7 --prompt "<the above prompt, with the path replaced>"
+   ```
+3. Fire a test run to confirm it delivers:
+   ```bash
+   hermes -p hearth cron run d33a2cfd15f7
+   ```
+
+The script only needs stock Python 3.8+ and outbound access to `partner-feeds.publishing.tamedia.ch`.
 
 ## License
 
