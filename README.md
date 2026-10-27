@@ -42,6 +42,8 @@ open tdg.ch in Chromium once, then re-run `token --sync`.
 # subscriber: today's published surface (front page + sections + news sitemap)
 python3 tdg.py index --hours 18 --json
 python3 tdg.py index --hours 24 --category geneve --json
+python3 tdg.py index --hours 18 --only-topics immobilier,taux,ai,tech --json
+python3 tdg.py index --hours 48 --sections ,geneve,economie --pages 3 --json
 python3 tdg.py index --sections ,geneve,suisse --json      # "" = front page
 
 # subscriber: complete article text (several at once, one process)
@@ -57,13 +59,33 @@ python3 tdg.py top 10 --hours 24 --md
 ### `index`
 
 Scrapes `teaser-data` JSON blocks from the tdg.ch front page and the section list
-below (Geneva sections, Suisse, votations, opinion, société), merges
-`https://www.tdg.ch/news.xml`, dedupes by article id and sorts newest first.
+below (Geneva sections, Suisse, votations, opinion, société, économie, high-tech,
+savoirs/technologie, monde), merges `https://www.tdg.ch/news.xml`, dedupes by article
+id and sorts newest first. `--pages N` walks `/<section>/page/2..N` for deeper archive
+coverage (the listing is path-paginated; `?page=` does nothing).
 
 Fields per item: `id`, `title`, `kicker`, `lead`, `url`, `section` (categoryPath),
-`is_premium`, `is_opinion`, `type`, `authors`, `published`, `source`.
-`subscriber_mode` in the JSON envelope tells you whether the token was used; without a
-token it degrades to RSS + sitemap titles (no leads, no premium flag).
+`is_premium`, `is_opinion`, `type`, `authors`, `published`, `source`, and `topics` when
+the item matches a standing interest. `subscriber_mode` in the JSON envelope tells you
+whether the token was used; without a token it degrades to RSS + sitemap titles (no
+leads, no premium flag).
+
+### Standing interests (`topics`)
+
+`TOPIC_PATTERNS` in the script tags items with Robert's standing interests, and any brief
+built from this tool must keep them:
+
+| tag | matches |
+|---|---|
+| `immobilier` | property, rents, logement, PPE, zoning, terrains, Asloca, mortgages |
+| `taux` | SNB/BNS, SARON, policy and mortgage rates, inflation, ECB/Fed, savings |
+| `ai` | IA, ChatGPT/Claude/Gemini, LLMs, chips, data centres, autonomous agents |
+| `tech` | cyber, platforms, start-ups, digitalisation, Big Tech, software |
+
+`--only-topics immobilier,taux,ai` returns just that subset — the reliable way for an
+agent to assemble the must-include list instead of eyeballing 100 headlines. Extend the
+patterns in `TOPIC_PATTERNS` when a new interest appears; keep them narrow enough that
+"taux de chômage" and "taux de participation" do not trigger `taux`.
 
 ### `article`
 
@@ -87,11 +109,14 @@ are followed manually with a cookie jar as a fallback.
 Powers the **Hearth** profile cron job **"Geneva morning brief (tdg.ch)"**
 (job id `d33a2cfd15f7`, `30 7 * * *`, delivered to Slack `#geneva-news`).
 
-The job prompt runs `index --hours 18 --json`, picks 6–8 notable Geneva stories, fetches
-them in a single `article <ids> --json` call, and writes English summaries from the full
-bodies with clickable links. It includes a self-healing step (`token --sync`, then one
-retry) and a `⚠️ Abonnement TDG non reconnu` fallback line if the subscription is not
-recognised.
+The job prompt runs `index --hours 18 --json`, then `index --hours 18 --only-topics
+immobilier,taux,ai,tech --json` for the standing-interest set, picks 6–8 notable Geneva
+stories, fetches them plus every flagged item in a single `article <ids> --json` call, and
+writes English summaries from the full bodies with clickable links. Property, rate and AI
+stories are **never dropped** for length or because they are not Geneva-specific — they
+land in a dedicated "Vos thèmes" section. The prompt includes a self-healing step
+(`token --sync`, then one retry) and a `⚠️ Abonnement TDG non reconnu` fallback line if
+the subscription is not recognised.
 
 ### Re-homing on a fresh host
 
@@ -111,9 +136,12 @@ recognised.
 
 ## Caveats
 
-- Listing pages paginate client-side: `?page=N` returns the same teasers, so `index`
-  covers each section's current teaser set only. Combined with `news.xml` this is
-  close to "everything published today", not a full archive.
+- `index` covers the current page of each section; `--pages N` walks deeper
+  (`/<section>/page/2..N`). Combined with `news.xml` this is close to "everything published
+  today", not the full archive.
+- Topic tagging is keyword-based: it catches the obvious phrasing and can miss a story
+  that discusses rents or rates without using the expected words. Treat `topics` as a
+  floor for must-include items, not a ceiling.
 - Live tickers (`type: tickers`) have a body that changes with the event; summaries of
   them age quickly.
 - Respect the paywall: this reads pages exactly like a logged-in browser would.

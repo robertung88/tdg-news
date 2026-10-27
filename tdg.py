@@ -55,7 +55,48 @@ GENEVA_FEEDS = ["geneve", "geneve/politique-genevoise", "geneve/faits-divers-gen
 INDEX_SECTIONS = ["", "geneve", "geneve/politique-genevoise", "geneve/faits-divers-geneve",
                   "geneve/grand-geneve", "geneve/geneve-internationale", "geneve/herrmann",
                   "geneve/encre-bleue", "geneve/signe-geneve", "suisse", "suisse/votations",
-                  "opinion", "societe"]
+                  "suisse/suisse-romande", "opinion", "societe", "economie", "high-tech",
+                  "savoirs/technologie", "savoirs", "monde"]
+
+# Standing interests: items matching these must never be dropped from a brief,
+# whatever else is selected. French + English keywords, case-insensitive.
+TOPIC_PATTERNS = {
+    "immobilier": [
+        r"\bimmobili", r"\bloyers?\b", r"\blogements?\b", r"\blocataires?\b", r"\bPPE\b",
+        r"\bpropriétaires?\b", r"\bbail\b", r"\bbaux\b", r"permis de construire",
+        r"\bparcelle", r"\bzone villa", r"promotion immobili", r"\bAsloca\b",
+        r"\bhypothèqu", r"surface commerciale", r"\bmètres carrés", r"\bvacance",
+        r"\brégie immobili", r"marché immobilier", r"\bquote-part", r"\bterrain",
+    ],
+    "taux": [
+        r"\bSNB\b", r"\bBNS\b", r"banque nationale", r"\bSARON\b", r"politique monétaire",
+        r"taux (?:directeur|hypothécaire|d['’]intérêt|à court terme|négatifs?)",
+        r"\bhypothéq", r"\binflation\b", r"taux d['’]intérêt", r"\bBCE\b", r"\bFed\b",
+        r"taux de base", r"obligations? souveraines", r"\bépargne\b", r"banques? centrales?",
+        r"coût du crédit", r"rendement obligataire",
+    ],
+    "ai": [
+        r"\bIA\b", r"intelligence artificielle", r"\bLLMs?\b", r"ChatGPT", r"OpenAI",
+        r"Anthropic", r"\bClaude\b", r"\bGemini\b", r"Nvidia", r"\balgorithm", r"\brobots?\b",
+        r"data ?cent(?:er|re)", r"semi-conducteurs?", r"générative?", r"DeepSeek",
+        r"Mistral", r"apprentissage automatique", r"machine learning", r"\bagents? autonomes?",
+    ],
+    "tech": [
+        r"\bcyber", r"\bnumérique\b", r"\bdigital", r"\bstart-?ups?\b", r"automatisation",
+        r"\bGAFAM\b", r"\bGoogle\b", r"\bMicrosoft\b", r"\bApple\b", r"\bMeta\b",
+        r"\bAmazon\b", r"\btechnolog", r"\bplateformes?\b", r"\blogiciel",
+    ],
+}
+_TOPIC_RE = {k: re.compile("|".join(v), re.I) for k, v in TOPIC_PATTERNS.items()}
+
+
+def tag_topics(items, text_fields=("title", "lead", "kicker")):
+    for it in items:
+        blob = " \n ".join(str(it.get(f) or "") for f in text_fields)
+        hits = [k for k, rx in _TOPIC_RE.items() if rx.search(blob)]
+        if hits:
+            it["topics"] = hits
+    return items
 
 
 # ---------------------------------------------------------------- HTTP plumbing
@@ -403,17 +444,22 @@ def parse_news_sitemap():
     return out
 
 
-def build_index(sections=None, hours=0, limit=0, include_sitemap=True, verbose=False):
+def build_index(sections=None, hours=0, limit=0, include_sitemap=True, verbose=False,
+                pages=1):
     sub = Subscriber(verbose=verbose)
     items = []
     if sub.configured:
         for sec in (sections if sections is not None else INDEX_SECTIONS):
-            url = SITE + "/" + sec if sec else SITE + "/"
-            status, page = sub.get(url)
-            found = parse_teasers(page)
-            if verbose:
-                print(f"[tdg] {url} -> {status} {len(found)} teasers", file=sys.stderr)
-            items.extend(found)
+            base = SITE + "/" + sec.rstrip("/") if sec else SITE
+            targets = [base]
+            if sec and pages > 1:
+                targets += [f"{base}/page/{n}" for n in range(2, pages + 1)]
+            for url in targets:
+                status, page = sub.get(url)
+                found = parse_teasers(page)
+                if verbose:
+                    print(f"[tdg] {url} -> {status} {len(found)} teasers", file=sys.stderr)
+                items.extend(found)
     else:
         items = [dict(i, id=i["url"], is_premium=None, is_opinion=None, kicker="",
                       section="", type="", authors=[i["author"]] if i.get("author") else [],
@@ -448,6 +494,7 @@ def build_index(sections=None, hours=0, limit=0, include_sitemap=True, verbose=F
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         out = [i for i in out if i.get("published") and i["published"] >= cutoff]
     out.sort(key=lambda i: i.get("published") or "", reverse=True)
+    tag_topics(out)
     if limit:
         out = out[:limit]
     return out, sub.configured
@@ -622,6 +669,8 @@ def print_item(it):
         flags.append("opinion")
     if it.get("section"):
         flags.append(it["section"])
+    if it.get("topics"):
+        flags.append("TOPIC:" + ",".join(it["topics"]))
     head = f"[{when}] {it.get('title','')}"
     if flags:
         head += "  (" + ", ".join(flags) + ")"
@@ -643,6 +692,11 @@ def main():
                                                     "(empty string = front page)")
     ap.add_argument("--category", action="append", default=None,
                     help="filter index by categoryPath prefix (repeatable)")
+    ap.add_argument("--pages", type=int, default=1,
+                    help="index: pages per section via /<section>/page/N (default 1)")
+    ap.add_argument("--only-topics", default=None,
+                    help="index: keep only items tagged with these standing interests "
+                         "(immobilier,taux,ai)")
     ap.add_argument("--no-sitemap", action="store_true", help="index: skip news.xml merge")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--md", action="store_true", help="markdown output")
@@ -714,10 +768,14 @@ def main():
             sections = [s.strip() for s in a.sections.split(",")]
         limit = int(a.args[0]) if a.args else 0
         items, subscribed = build_index(sections=sections, hours=a.hours, limit=0,
-                                        include_sitemap=not a.no_sitemap, verbose=a.verbose)
+                                        include_sitemap=not a.no_sitemap, verbose=a.verbose,
+                                        pages=max(1, a.pages))
         if a.category:
             items = [i for i in items
                      if any((i.get("section") or "").startswith(c) for c in a.category)]
+        if a.only_topics:
+            want = {t.strip().lower() for t in a.only_topics.split(",") if t.strip()}
+            items = [i for i in items if want & {t.lower() for t in i.get("topics") or []}]
         if limit:
             items = items[:limit]
         payload = {"subscriber_mode": subscribed, "count": len(items), "items": items}
@@ -725,7 +783,8 @@ def main():
             print(json.dumps(payload, ensure_ascii=False, indent=1))
         elif a.md:
             for i in items:
-                print(f"- [{i['title']}]({i['url']})" + (f" — {i['lead']}" if i.get("lead") else ""))
+                tag = f"[{','.join(i['topics'])}] " if i.get("topics") else ""
+                print(f"- {tag}[{i['title']}]({i['url']})" + (f" — {i['lead']}" if i.get("lead") else ""))
         else:
             print(f"# {len(items)} articles (subscriber_mode={subscribed})")
             for i in items:
