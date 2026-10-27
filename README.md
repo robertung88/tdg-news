@@ -1,101 +1,122 @@
 # tdg-news
 
-A tiny, dependency-free CLI for pulling the latest top articles from **Tribune de Genève (tdg.ch)** — Geneva's daily newspaper — via Tamedia's public partner RSS feeds.
+A small CLI for **Tribune de Genève (tdg.ch)** with two modes:
 
-Built as a reusable tool for the Hearth agent's "Geneva morning brief" cron job, so the script can be versioned, referenced across setups, and re-homed on a fresh host without digging through an abandoned Docker sandbox.
+- **public** — Tamedia's partner RSS feeds: headlines plus the one-paragraph lead.
+- **subscriber** — your own tdg.ch session, which unlocks the site's listing pages
+  (structured teaser JSON for every article on the front page and each section) and
+  the **complete article body** instead of the paywall teaser.
+
+Built for the Hearth profile's "Geneva morning brief" cron job, which now summarises
+from full article text rather than RSS leads.
 
 ## Requirements
 
-- Python 3.8+ (stdlib only — `argparse`, `json`, `urllib`, `xml.etree.ElementTree`).
-- No `pip install`. No API key. Network access to `partner-feeds.publishing.tamedia.ch`.
+- Python 3.8+ (`argparse`, `json`, `urllib`, `sqlite3`, `html.parser` — all stdlib).
+- `cryptography` **only** for `token --sync` (reading the browser cookie DB).
+- Network access to `www.tdg.ch` and `partner-feeds.publishing.tamedia.ch`.
+- A valid tdg.ch subscription session for subscriber mode.
 
-## Install / Run
-
-Just clone and run directly — the script is self-contained and executable:
+## Setup (subscription mode)
 
 ```bash
-git clone https://github.com/robertung88/tdg-news.git
-cd tdg-news
-
-python3 tdg.py top 15 --json      # top 15 Geneva articles as JSON
-python3 tdg.py top 10             # human-readable list
-python3 tdg.py top 8 --md         # Markdown with clickable links
-python3 tdg.py search tren           # search all articles for "tren"
-python3 tdg.py top 10 --hours 24     # only articles from the last 24h
+python3 tdg.py token --sync          # import the refreshToken cookie from local Chromium/Brave/Chrome
+python3 tdg.py token                 # verify: hasSubscription should be True
 ```
+
+`token --sync` copies the newest `tdg.ch` `refreshToken` cookie from a Chrome-family
+profile, decrypts it with the "Chrome Safe Storage" key from the OS keyring
+(`secret-tool`), and writes it to `~/.config/tdg/refresh_token` (mode 600).
+
+The stored token *is* a session credential — treat it like a password. It lives
+outside the repo and is never committed. Override the location with
+`TDG_TOKEN_FILE=/path` or the token itself with `TDG_REFRESH_TOKEN`.
+
+Token lifetime is long (the Piano refresh token currently expires in ~1 year), but if
+the brief ever comes back with `paywalled: true`, the cookie was rotated or revoked:
+open tdg.ch in Chromium once, then re-run `token --sync`.
 
 ## Usage
 
-```
-usage: tdg-news [-h] [command] [arg] [--hours HOURS] [--feeds FEEDS] [--json] [--md]
+```bash
+# subscriber: today's published surface (front page + sections + news sitemap)
+python3 tdg.py index --hours 18 --json
+python3 tdg.py index --hours 24 --category geneve --json
+python3 tdg.py index --sections ,geneve,suisse --json      # "" = front page
 
-Command:
-  top       (default) latest top articles
-  search    filter articles whose title+lead contain the search keyword
+# subscriber: complete article text (several at once, one process)
+python3 tdg.py article 764245742790 101232672867 --json
+python3 tdg.py article https://www.tdg.ch/some-slug-123456789012
 
-Arguments:
-  arg       for `top`: number of articles to return (default 10)
-            for `search`: the keyword to match
-
-Options:
-  --hours N     only return articles published within the last N hours
-  --feeds LIST  comma-separated feed slug override (default: Geneva feeds)
-  --json        output as JSON
-  --md          output as Markdown with clickable `[Titre](url)` links
+# public fallback (no token needed)
+python3 tdg.py top 15 --json
+python3 tdg.py search tren
+python3 tdg.py top 10 --hours 24 --md
 ```
 
-## Feeds
+### `index`
 
-By default the CLI aggregates these Geneva sections from `https://partner-feeds.publishing.tamedia.ch/rss/tdg`:
+Scrapes `teaser-data` JSON blocks from the tdg.ch front page and the section list
+below (Geneva sections, Suisse, votations, opinion, société), merges
+`https://www.tdg.ch/news.xml`, dedupes by article id and sorts newest first.
 
-- `geneve`
-- `geneve/politique-genevoise`
-- `geneve/faits-divers-geneve`
-- `geneve/grand-geneve`
-- `geneve/geneve-internationale`
-- `geneve/herrmann`
-- `geneve/encre-bleue`
-- `geneve/signe-geneve`
+Fields per item: `id`, `title`, `kicker`, `lead`, `url`, `section` (categoryPath),
+`is_premium`, `is_opinion`, `type`, `authors`, `published`, `source`.
+`subscriber_mode` in the JSON envelope tells you whether the token was used; without a
+token it degrades to RSS + sitemap titles (no leads, no premium flag).
 
-Override with `--feeds slug,slug`. Only items whose URL resolves to `https://www.tdg.ch/` are kept.
+### `article`
 
-## Output
+Returns `id`, `url`, `title`, `lead`, `section`, `authors`, `published`, `modified`,
+`is_premium`, `paywalled`, `warning`, `words`, `body` (full text, paragraphs joined) and
+`paragraphs`. `paywalled: true` plus a `warning` means the token was missing or stale —
+the body then only holds the free teaser. Body extraction targets
+`article[data-article-body]`, keeping `p.articleParagraph`, `h2.crosshead` and
+blockquotes, and skipping related-teaser asides, figures and scripts.
 
-Each item includes `title`, `url`, `lead` (the article's lead/description text), `author`, and `published` (ISO-8601 UTC timestamp) — or `null` if the feed doesn't provide it. With `--json` the full list is printed as a JSON array.
+### Authentication flow (why the code looks odd)
+
+tdg.ch answers a paywalled article request with `302` + `Set-Cookie: entitlementToken`
+and redirects back to the same URL, so a plain fetch redirect-loops. The tool bootstraps
+instead: one `HEAD /` with the `refreshToken` cookie mints a short-lived (~30 min)
+subscriber `entitlementToken`, which is then sent directly on article requests. Redirects
+are followed manually with a cookie jar as a fallback.
 
 ## Integration
 
-This script exists to power the **Hearth** profile's cron job **"Geneva morning brief (tdg.ch)"** (`job id d33a2cfd15f7`), which builds the daily Geneva news brief delivered to the "House of Ung" Telegram chat.
+Powers the **Hearth** profile cron job **"Geneva morning brief (tdg.ch)"**
+(job id `d33a2cfd15f7`, `30 7 * * *`, delivered to Slack `#geneva-news`).
 
-The job is an LLM-driven agent task — it does not call the script directly. Instead, its prompt instructs the agent to run the script in the terminal and curate the result:
-
-> Build a concise Geneva-morning news brief from the Tribune de Genève. Run in the terminal: `python3 /home/roblinux/tdg-news/tdg.py top 15 --json`. Pick the 6–8 most notable Geneva stories. Present EVERY headline as a CLICKABLE link in Telegram markdown — [Titre](url) — each followed by a 1–2 sentence English summary from that item's lead text. Start with a one-line 'À la une' opener. Group by theme (politique, faits divers, grand Genève, société...) if it reads cleanly. Keep the whole thing under ~250 words. Every headline MUST be a clickable link to its article. If the feed fetch fails or returns nothing, say so plainly and do NOT invent stories.
-
-Job summary:
-
-| Field | Value |
-|-------|-------|
-| Profile | `hearth` |
-| Job ID | `d33a2cfd15f7` |
-| Schedule | `30 7 * * *` (07:30 CET, daily) |
-| Deliver | `origin` → Telegram "House of Ung" (`-1003950035504`) |
-| Model | `deepseek-v4-flash-vision-exp` (served from sparky) |
+The job prompt runs `index --hours 18 --json`, picks 6–8 notable Geneva stories, fetches
+them in a single `article <ids> --json` call, and writes English summaries from the full
+bodies with clickable links. It includes a self-healing step (`token --sync`, then one
+retry) and a `⚠️ Abonnement TDG non reconnu` fallback line if the subscription is not
+recognised.
 
 ### Re-homing on a fresh host
 
-The script path is **host-specific**. On the Omarchy host it lives at `/home/roblinux/tdg-news/tdg.py`; on the old Mac Mini Docker setup it was `/root/tdg-news/tdg.py`. When cloning to a new host:
-
 1. Clone this repo into a stable location (e.g. `~/tdg-news`).
-2. Update the cron job prompt to point at the local path:
+2. Run `python3 tdg.py token --sync`, then `python3 tdg.py token` to confirm
+   `hasSubscription: True`.
+3. Point the cron job at the new path:
    ```bash
-   hermes -p hearth cron edit d33a2cfd15f7 --prompt "<the above prompt, with the path replaced>"
+   hermes -p hearth cron edit d33a2cfd15f7 --prompt "<prompt with the path replaced>"
    ```
-3. Fire a test run to confirm it delivers:
+4. Test fire **in the background** (a run takes 1–5 minutes; killing the CLI mid-run
+   marks the execution `unknown` and suppresses delivery):
    ```bash
    hermes -p hearth cron run d33a2cfd15f7
    ```
+   Then check `~/.hermes/profiles/hearth/cron/output/d33a2cfd15f7/`.
 
-The script only needs stock Python 3.8+ and outbound access to `partner-feeds.publishing.tamedia.ch`.
+## Caveats
+
+- Listing pages paginate client-side: `?page=N` returns the same teasers, so `index`
+  covers each section's current teaser set only. Combined with `news.xml` this is
+  close to "everything published today", not a full archive.
+- Live tickers (`type: tickers`) have a body that changes with the event; summaries of
+  them age quickly.
+- Respect the paywall: this reads pages exactly like a logged-in browser would.
 
 ## License
 
